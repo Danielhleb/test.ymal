@@ -1,0 +1,206 @@
+name: ALM Environment ARM Templates Backup
+
+on:
+  push:
+    branches: ["master", "main"]
+  pull_request:
+    branches: ["master", "main"]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to backup (all, test, dev, pre, prod)'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+        - all
+        - test
+        - dev
+        - pre
+        - prod
+
+permissions:
+  id-token: write
+  contents: write
+
+env:
+  AZURE_TEST_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID_SECRETS_APPREG_ALMCICD_TEST_USGOVVA_01_CLIENT_ID }}
+  AZURE_TEST_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET_SECRETS_APPREG_ALMCICD_TEST_USGOVVA_01_CLIENT_SECRET }}
+  AZURE_TEST_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID_SECRETS_TEST_SUBCRIPTION_ID }}
+  AZURE_DEV_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID_SECRETS_APPREG_ALMCICD_DEV_USGOVVA_01_CLIENT_ID }}
+  AZURE_DEV_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET_SECRETS_APPREG_ALMCICD_DEV_USGOVVA_01_CLIENT_SECRET }}
+  AZURE_DEV_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID_SECRETS_DEV_SUBCRIPTION_ID }}
+  AZURE_PRE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID_SECRETS_APPREG_ALMCICD_PRE_USGOVVA_01_CLIENT_ID }}
+  AZURE_PRE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET_SECRETS_APPREG_ALMCICD_PRE_USGOVVA_01_CLIENT_SECRET }}
+  AZURE_PRE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID_SECRETS_PRE_SUBCRIPTION_ID }}
+  AZURE_PROD_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID_SECRETS_APPREG_ALMCICD_PRD_USGOVVA_01_CLIENT_ID }}
+  AZURE_PROD_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET_SECRETS_APPREG_ALMCICD_PRD_USGOVVA_01_CLIENT_SECRET }}
+  AZURE_PROD_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID_SECRETS_PRD_SUBCRIPTION_ID }}
+  AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID_SECRETS_TENANT_ID }}
+
+jobs:
+  backup-alm-test:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.environment == 'all' || github.event.inputs.environment == 'test' || github.event.inputs.environment == '' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: '{"clientId":"${{ env.AZURE_TEST_CLIENT_ID }}","clientSecret":"${{ env.AZURE_TEST_CLIENT_SECRET }}","subscriptionId":"${{ env.AZURE_TEST_SUBSCRIPTION_ID }}","tenantId":"${{ env.AZURE_TENANT_ID}}"}'
+          environment: 'AzureUSGovernment'
+
+      - name: Backup ARM Templates
+        uses: ./.github/actions/backup-arm-templates
+        with:
+          subscription-id: ${{ env.AZURE_TEST_SUBSCRIPTION_ID }}
+          environment-name: 'TEST'
+          folder-name: 'ALM-TEST'
+
+      - name: Upload TEST Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: alm-test-backup
+          path: ./ALM-TEST
+          if-no-files-found: ignore
+          retention-days: 7
+
+  backup-alm-dev:
+    runs-on: ubuntu-latest
+    needs: backup-alm-test
+    if: ${{ github.event.inputs.environment == 'all' || github.event.inputs.environment == 'dev' || github.event.inputs.environment == '' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: '{"clientId":"${{ env.AZURE_DEV_CLIENT_ID }}","clientSecret":"${{ env.AZURE_DEV_CLIENT_SECRET }}","subscriptionId":"${{ env.AZURE_DEV_SUBSCRIPTION_ID }}","tenantId":"${{ env.AZURE_TENANT_ID}}"}'
+          environment: 'AzureUSGovernment'
+
+      - name: Backup ARM Templates
+        uses: ./.github/actions/backup-arm-templates
+        with:
+          subscription-id: ${{ env.AZURE_DEV_SUBSCRIPTION_ID }}
+          environment-name: 'DEV'
+          folder-name: 'ALM-DEV'
+
+      - name: Upload DEV Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: alm-dev-backup
+          path: ./ALM-DEV
+          if-no-files-found: ignore
+          retention-days: 7
+
+  backup-alm-pre:
+    runs-on: ubuntu-latest
+    needs: backup-alm-dev
+    if: ${{ github.event.inputs.environment == 'all' || github.event.inputs.environment == 'pre' || github.event.inputs.environment == '' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: '{"clientId":"${{ env.AZURE_PRE_CLIENT_ID }}","clientSecret":"${{ env.AZURE_PRE_CLIENT_SECRET }}","subscriptionId":"${{ env.AZURE_PRE_SUBSCRIPTION_ID }}","tenantId":"${{ env.AZURE_TENANT_ID}}"}'
+          environment: 'AzureUSGovernment'
+
+      - name: Backup ARM Templates
+        uses: ./.github/actions/backup-arm-templates
+        with:
+          subscription-id: ${{ env.AZURE_PRE_SUBSCRIPTION_ID }}
+          environment-name: 'PREPROD'
+          folder-name: 'ALM-PREPROD'
+
+      - name: Upload PRE Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: alm-pre-backup
+          path: ./ALM-PREPROD
+          if-no-files-found: ignore
+          retention-days: 7
+
+  backup-alm-prod:
+    runs-on: ubuntu-latest
+    needs: backup-alm-pre
+    if: ${{ github.event.inputs.environment == 'all' || github.event.inputs.environment == 'prod' || github.event.inputs.environment == '' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: '{"clientId":"${{ env.AZURE_PROD_CLIENT_ID }}","clientSecret":"${{ env.AZURE_PROD_CLIENT_SECRET }}","subscriptionId":"${{ env.AZURE_PROD_SUBSCRIPTION_ID }}","tenantId":"${{ env.AZURE_TENANT_ID}}"}'
+          environment: 'AzureUSGovernment'
+
+      - name: Backup ARM Templates
+        uses: ./.github/actions/backup-arm-templates
+        with:
+          subscription-id: ${{ env.AZURE_PROD_SUBSCRIPTION_ID }}
+          environment-name: 'PROD'
+          folder-name: 'ALM-PROD'
+
+      - name: Upload PROD Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: alm-prod-backup
+          path: ./ALM-PROD
+          if-no-files-found: ignore
+          retention-days: 7
+
+  push-all-backups:
+    runs-on: ubuntu-latest
+    needs: [backup-alm-test, backup-alm-dev, backup-alm-pre, backup-alm-prod]
+    if: always() && (needs.backup-alm-test.result == 'success' || needs.backup-alm-dev.result == 'success' || needs.backup-alm-pre.result == 'success' || needs.backup-alm-prod.result == 'success')
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: alm-*-backup
+          merge-multiple: true
+
+      - name: List downloaded files
+        run: |
+          echo "Downloaded files:"
+          find . -type f -name "*.json" | sort
+          echo "Directory structure:"
+          ls -la
+
+      - name: Commit and Push All Backups
+        run: |
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "GitHub Actions"
+          
+          # Check if there are any changes to commit
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          
+          # Create commit with detailed message
+          timestamp=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          commit_message="ARM Templates Backup - $timestamp
+          
+          Environments backed up:
+          - TEST: ${{ needs.backup-alm-test.result }}
+          - DEV: ${{ needs.backup-alm-dev.result }}
+          - PREPROD: ${{ needs.backup-alm-pre.result }}
+          - PROD: ${{ needs.backup-alm-prod.result }}
+          
+          Triggered by: ${{ github.event_name }}
+          Commit: ${{ github.sha }}"
+          
+          git add .
+          git commit -m "$commit_message"
+          git push
