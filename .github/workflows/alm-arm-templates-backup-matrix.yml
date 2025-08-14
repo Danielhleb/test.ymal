@@ -1,0 +1,211 @@
+name: ALM Environment ARM Templates Backup (Matrix)
+
+on:
+  push:
+    branches: ["master"]
+  pull_request:
+    branches: ["master"]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: write
+
+env:
+  # Test Environment
+  AZURE_TEST_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID_SECRETS_APPREG_ALMCICD_TEST_USGOVVA_01_CLIENT_ID }}
+  AZURE_TEST_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET_SECRETS_APPREG_ALMCICD_TEST_USGOVVA_01_CLIENT_SECRET }}
+  AZURE_TEST_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID_SECRETS_TEST_SUBCRIPTION_ID }}
+  
+  # Development Environment
+  AZURE_DEV_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID_SECRETS_APPREG_ALMCICD_DEV_USGOVVA_01_CLIENT_ID }}
+  AZURE_DEV_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET_SECRETS_APPREG_ALMCICD_DEV_USGOVVA_01_CLIENT_SECRET }}
+  AZURE_DEV_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID_SECRETS_DEV_SUBCRIPTION_ID }}
+  
+  # Pre-Production Environment
+  AZURE_PRE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID_SECRETS_APPREG_ALMCICD_PRE_USGOVVA_01_CLIENT_ID }}
+  AZURE_PRE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET_SECRETS_APPREG_ALMCICD_PRE_USGOVVA_01_CLIENT_SECRET }}
+  AZURE_PRE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID_SECRETS_PRE_SUBCRIPTION_ID }}
+  
+  # Production Environment
+  AZURE_PROD_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID_SECRETS_APPREG_ALMCICD_PRD_USGOVVA_01_CLIENT_ID }}
+  AZURE_PROD_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET_SECRETS_APPREG_ALMCICD_PRD_USGOVVA_01_CLIENT_SECRET }}
+  AZURE_PROD_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID_SECRETS_PRD_SUBCRIPTION_ID }}
+  
+  # Common
+  AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID_SECRETS_TENANT_ID }}
+
+jobs:
+  backup-alm-environments:
+    name: Backup ALM ${{ matrix.environment.display_name }} Environment
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false  # Continue other environments even if one fails
+      matrix:
+        environment:
+          - name: "test"
+            display_name: "Test"
+            folder: "ALM-TEST"
+            client_id_var: "AZURE_TEST_CLIENT_ID"
+            client_secret_var: "AZURE_TEST_CLIENT_SECRET"
+            subscription_id_var: "AZURE_TEST_SUBSCRIPTION_ID"
+            artifact_name: "alm-test-backup"
+          - name: "dev"
+            display_name: "Development"
+            folder: "ALM-DEV"
+            client_id_var: "AZURE_DEV_CLIENT_ID"
+            client_secret_var: "AZURE_DEV_CLIENT_SECRET"
+            subscription_id_var: "AZURE_DEV_SUBSCRIPTION_ID"
+            artifact_name: "alm-dev-backup"
+          - name: "pre"
+            display_name: "Pre-Production"
+            folder: "ALM-PREPROD"
+            client_id_var: "AZURE_PRE_CLIENT_ID"
+            client_secret_var: "AZURE_PRE_CLIENT_SECRET"
+            subscription_id_var: "AZURE_PRE_SUBSCRIPTION_ID"
+            artifact_name: "alm-pre-backup"
+          - name: "prod"
+            display_name: "Production"
+            folder: "ALM-PROD"
+            client_id_var: "AZURE_PROD_CLIENT_ID"
+            client_secret_var: "AZURE_PROD_CLIENT_SECRET"
+            subscription_id_var: "AZURE_PROD_SUBSCRIPTION_ID"
+            artifact_name: "alm-prod-backup"
+            
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Make backup script executable
+        run: chmod +x ./.github/scripts/backup-arm-templates.sh
+
+      - name: Get Azure credentials for ${{ matrix.environment.display_name }}
+        id: get_creds
+        run: |
+          CLIENT_ID="${{ env[matrix.environment.client_id_var] }}"
+          CLIENT_SECRET="${{ env[matrix.environment.client_secret_var] }}"
+          SUBSCRIPTION_ID="${{ env[matrix.environment.subscription_id_var] }}"
+          
+          if [ -z "$CLIENT_ID" ] || [ -z "$CLIENT_SECRET" ] || [ -z "$SUBSCRIPTION_ID" ]; then
+            echo "❌ Error: Missing Azure credentials for ${{ matrix.environment.display_name }} environment"
+            echo "CLIENT_ID_SET=$([ -n "$CLIENT_ID" ] && echo 'true' || echo 'false')"
+            echo "CLIENT_SECRET_SET=$([ -n "$CLIENT_SECRET" ] && echo 'true' || echo 'false')"
+            echo "SUBSCRIPTION_ID_SET=$([ -n "$SUBSCRIPTION_ID" ] && echo 'true' || echo 'false')"
+            exit 1
+          fi
+          
+          echo "client_id=$CLIENT_ID" >> $GITHUB_OUTPUT
+          echo "client_secret=$CLIENT_SECRET" >> $GITHUB_OUTPUT
+          echo "subscription_id=$SUBSCRIPTION_ID" >> $GITHUB_OUTPUT
+
+      - name: Azure login for ${{ matrix.environment.display_name }} Environment
+        uses: azure/login@v2
+        with:
+          creds: '{"clientId":"${{ steps.get_creds.outputs.client_id }}","clientSecret":"${{ steps.get_creds.outputs.client_secret }}","subscriptionId":"${{ steps.get_creds.outputs.subscription_id }}","tenantId":"${{ env.AZURE_TENANT_ID}}"}'
+          environment: 'AzureUSGovernment'
+
+      - name: Backup ${{ matrix.environment.display_name }} Environment ARM Templates
+        run: ./.github/scripts/backup-arm-templates.sh "${{ matrix.environment.folder }}" "${{ steps.get_creds.outputs.subscription_id }}"
+
+      - name: Upload ${{ matrix.environment.display_name }} Environment Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.environment.artifact_name }}
+          path: ./${{ matrix.environment.folder }}
+          if-no-files-found: ignore
+          retention-days: 7  # Increased retention for better reliability
+
+  commit-all-backups:
+    name: Commit and Push All ARM Template Backups
+    runs-on: ubuntu-latest
+    needs: backup-alm-environments
+    if: always()  # Run even if some backup jobs fail
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download All Environment Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./backups
+
+      - name: Organize backup files
+        run: |
+          echo "Organizing backup files..."
+          
+          # Create target directories
+          mkdir -p ALM-TEST ALM-DEV ALM-PREPROD ALM-PROD
+          
+          # Move files from artifact directories to target directories
+          if [ -d "./backups/alm-test-backup" ]; then
+            cp -r ./backups/alm-test-backup/* ./ALM-TEST/ 2>/dev/null || echo "No test backup files to copy"
+          fi
+          
+          if [ -d "./backups/alm-dev-backup" ]; then
+            cp -r ./backups/alm-dev-backup/* ./ALM-DEV/ 2>/dev/null || echo "No dev backup files to copy"
+          fi
+          
+          if [ -d "./backups/alm-pre-backup" ]; then
+            cp -r ./backups/alm-pre-backup/* ./ALM-PREPROD/ 2>/dev/null || echo "No pre-prod backup files to copy"
+          fi
+          
+          if [ -d "./backups/alm-prod-backup" ]; then
+            cp -r ./backups/alm-prod-backup/* ./ALM-PROD/ 2>/dev/null || echo "No prod backup files to copy"
+          fi
+          
+          # Clean up temporary backup directory
+          rm -rf ./backups
+
+      - name: List files before commit
+        run: |
+          echo "Files to be committed:"
+          find . -type f -name "*.json" | sort || echo "No JSON files found"
+          echo ""
+          echo "Directory structure:"
+          ls -la
+          echo ""
+          echo "Environment-specific directories:"
+          for dir in ALM-TEST ALM-DEV ALM-PREPROD ALM-PROD; do
+            if [ -d "$dir" ]; then
+              echo "=== $dir ==="
+              find "$dir" -type f | head -10
+              echo ""
+            fi
+          done
+
+      - name: Commit and Push All Backups
+        run: |
+          git config --global user.email "no-reply@github.com"
+          git config --global user.name "GitHub Actions Bot"
+          
+          # Check if there are any changes to commit
+          git add .
+          
+          if [[ -n $(git status --porcelain) ]]; then
+            echo "Changes detected, committing files..."
+            
+            # Create comprehensive commit message
+            commit_message="ARM Templates Backup for ALL ALM Environments - $(date '+%Y-%m-%d %H:%M:%S UTC')"
+            
+            # Add summary of backed up files
+            json_count=$(find . -name "*.json" -type f | wc -l)
+            if [ "$json_count" -gt 0 ]; then
+              commit_message="$commit_message"$'\n\n'"Summary:"
+              commit_message="$commit_message"$'\n'"- Total JSON files: $json_count"
+              
+              for env in TEST DEV PREPROD PROD; do
+                env_count=$(find "./ALM-$env" -name "*.json" -type f 2>/dev/null | wc -l)
+                if [ "$env_count" -gt 0 ]; then
+                  commit_message="$commit_message"$'\n'"- ALM-$env: $env_count files"
+                fi
+              done
+            fi
+            
+            git commit -m "$commit_message"
+            git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
+            git push
+            
+            echo "✅ Successfully committed and pushed backup files"
+          else
+            echo "ℹ️ No changes to commit"
+          fi
