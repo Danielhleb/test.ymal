@@ -1,0 +1,171 @@
+name: 'Backup ARM Templates'
+description: 'Backup ARM templates from Azure resource groups'
+
+inputs:
+  subscription-id:
+    description: 'Azure subscription ID'
+    required: true
+  environment-name:
+    description: 'Environment name for logging'
+    required: true
+  folder-name:
+    description: 'Folder name for storing backups'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Validate inputs
+      shell: bash
+      run: |
+        if [ -z "${{ inputs.subscription-id }}" ]; then
+          echo "Error: subscription-id is required"
+          exit 1
+        fi
+        
+        if [ -z "${{ inputs.environment-name }}" ]; then
+          echo "Error: environment-name is required"
+          exit 1
+        fi
+        
+        if [ -z "${{ inputs.folder-name }}" ]; then
+          echo "Error: folder-name is required"
+          exit 1
+        fi
+
+    - name: Set Azure context
+      shell: bash
+      run: |
+        echo "Setting Azure context for subscription: ${{ inputs.subscription-id }}"
+        az account set --subscription "${{ inputs.subscription-id }}"
+        
+        # Verify context
+        current_sub=$(az account show --query id -o tsv)
+        if [ "$current_sub" != "${{ inputs.subscription-id }}" ]; then
+          echo "Error: Failed to set subscription context"
+          exit 1
+        fi
+        echo "Successfully set subscription context"
+
+    - name: Create backup directory
+      shell: bash
+      run: |
+        timestamp=$(date +"%Y%m%d-%H%M%S")
+        baseFolder="."
+        subscriptionFolder="$baseFolder/${{ inputs.folder-name }}"
+        mkdir -p "$subscriptionFolder"
+        echo "Created backup folder: $subscriptionFolder"
+        echo "timestamp=$timestamp" >> $GITHUB_ENV
+
+    - name: Get resource groups
+      shell: bash
+      run: |
+        echo "Retrieving resource groups from subscription..."
+        resourceGroups=$(az group list --query "[].name" -o json)
+        
+        if [ "$(echo $resourceGroups | jq '. | length')" -eq 0 ]; then
+          echo "No resource groups found in subscription: ${{ inputs.subscription-id }}"
+          echo "Creating empty backup file"
+          echo "{ \"error\": \"No resource groups found\", \"subscription\": \"${{ inputs.subscription-id }}\", \"timestamp\": \"$timestamp\" }" > "$subscriptionFolder/no_resource_groups_${timestamp}.json"
+          exit 0
+        fi
+        
+        echo "Found $(echo $resourceGroups | jq '. | length') resource group(s) in subscription: ${{ inputs.subscription-id }}"
+        echo "resourceGroups=$resourceGroups" >> $GITHUB_ENV
+
+    - name: Export ARM templates
+      shell: bash
+      run: |
+        subscriptionFolder="$baseFolder/${{ inputs.folder-name }}"
+        timestamp="${{ env.timestamp }}"
+        resourceGroups="${{ env.resourceGroups }}"
+        
+        success_count=0
+        error_count=0
+        
+        for resourceGroupName in $(echo $resourceGroups | jq -r '.[]'); do
+          echo "Processing resource group: $resourceGroupName"
+          resourceGroupFolder="$subscriptionFolder/$resourceGroupName"
+          mkdir -p "$resourceGroupFolder"
+          fileName="${resourceGroupName}_${timestamp}.json"
+          filePath="$resourceGroupFolder/$fileName"
+          
+          echo "Attempting to export ARM template for resource group: $resourceGroupName"
+          
+          # Try primary export method
+          export_result=$(az group export --name "$resourceGroupName" --include-parameter-default-value --skip-resource-name-params 2>&1)
+          export_status=$?
+          
+          if [ $export_status -eq 0 ]; then
+            echo "$export_result" > "$filePath"
+            filesize=$(du -h "$filePath" | cut -f1)
+            echo "✓ Exported ARM template saved to: $filePath (Size: $filesize)"
+            
+            # Validate JSON
+            if jq empty "$filePath" 2>/dev/null; then
+              echo "✓ Verified valid JSON content"
+              ((success_count++))
+            else
+              echo "⚠ Warning: Exported file may not contain valid JSON"
+              echo "First 100 characters of file content:"
+              head -c 100 "$filePath"
+              ((error_count++))
+            fi
+          else
+            echo "✗ Failed to export ARM template for resource group: $resourceGroupName"
+            echo "Error details: $export_result"
+            
+            # Try alternative export method
+            echo "Trying alternative export method..."
+            alt_result=$(az deployment group list --resource-group "$resourceGroupName" --query "[0].properties.template" -o json 2>&1)
+            alt_status=$?
+            
+            if [ $alt_status -eq 0 ] && [ -n "$alt_result" ] && [ "$alt_result" != "null" ]; then
+              echo "$alt_result" > "$filePath"
+              echo "✓ Alternative export method succeeded"
+              ((success_count++))
+            else
+              echo "✗ Alternative export also failed"
+              echo "{ \"error\": \"No deployments found to export\", \"resourceGroup\": \"$resourceGroupName\", \"subscription\": \"${{ inputs.subscription-id }}\", \"timestamp\": \"$timestamp\" }" > "$filePath"
+              ((error_count++))
+            fi
+          fi
+          
+          echo "---"
+        done
+        
+        echo "Export Summary for ${{ inputs.environment-name }}:"
+        echo "✓ Successful exports: $success_count"
+        echo "✗ Failed exports: $error_count"
+        echo "Total resource groups processed: $(echo $resourceGroups | jq '. | length')"
+        
+        # Set output for the job
+        echo "success_count=$success_count" >> $GITHUB_ENV
+        echo "error_count=$error_count" >> $GITHUB_ENV
+
+    - name: Create summary report
+      shell: bash
+      run: |
+        subscriptionFolder="$baseFolder/${{ inputs.folder-name }}"
+        timestamp="${{ env.timestamp }}"
+        
+        summary_file="$subscriptionFolder/backup_summary_${timestamp}.json"
+        
+        cat > "$summary_file" << EOF
+        {
+          "environment": "${{ inputs.environment-name }}",
+          "subscription_id": "${{ inputs.subscription-id }}",
+          "backup_timestamp": "$timestamp",
+          "backup_date": "$(date -u +"%Y-%m-%d %H:%M:%S UTC")",
+          "summary": {
+            "successful_exports": ${{ env.success_count }},
+            "failed_exports": ${{ env.error_count }},
+            "total_resource_groups": $(echo ${{ env.resourceGroups }} | jq '. | length')
+          },
+          "triggered_by": "${{ github.event_name }}",
+          "commit_sha": "${{ github.sha }}"
+        }
+        EOF
+        
+        echo "Created summary report: $summary_file"
+        echo "Backup completed for ${{ inputs.environment-name }} environment"
