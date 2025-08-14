@@ -1,36 +1,454 @@
-# This is a basic workflow to help you get started with Actions
+name: ALM Environment ARM Templates Backup
 
-name: CI
-
-# Controls when the workflow will run
 on:
-  # Triggers the workflow on push or pull request events but only for the "main" branch
   push:
-    branches: [ "main" ]
+    branches: ["master"]
   pull_request:
-    branches: [ "main" ]
-
-  # Allows you to run this workflow manually from the Actions tab
+    branches: ["master"]
   workflow_dispatch:
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+permissions:
+  id-token: write
+  contents: write
+
+env:
+  AZURE_TEST_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID_SECRETS_APPREG_ALMCICD_TEST_USGOVVA_01_CLIENT_ID }}
+  AZURE_TEST_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET_SECRETS_APPREG_ALMCICD_TEST_USGOVVA_01_CLIENT_SECRET }}
+  AZURE_TEST_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID_SECRETS_TEST_SUBCRIPTION_ID }}
+  AZURE_DEV_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID_SECRETS_APPREG_ALMCICD_DEV_USGOVVA_01_CLIENT_ID }}
+  AZURE_DEV_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET_SECRETS_APPREG_ALMCICD_DEV_USGOVVA_01_CLIENT_SECRET }}
+  AZURE_DEV_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID_SECRETS_DEV_SUBCRIPTION_ID }}
+  AZURE_PRE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID_SECRETS_APPREG_ALMCICD_PRE_USGOVVA_01_CLIENT_ID }}
+  AZURE_PRE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET_SECRETS_APPREG_ALMCICD_PRE_USGOVVA_01_CLIENT_SECRET }}
+  AZURE_PRE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID_SECRETS_PRE_SUBCRIPTION_ID }}
+  AZURE_PROD_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID_SECRETS_APPREG_ALMCICD_PRD_USGOVVA_01_CLIENT_ID }}
+  AZURE_PROD_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET_SECRETS_APPREG_ALMCICD_PRD_USGOVVA_01_CLIENT_SECRET }}
+  AZURE_PROD_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID_SECRETS_PRD_SUBCRIPTION_ID }}
+  AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID_SECRETS_TENANT_ID }}
+
 jobs:
-  # This workflow contains a single job called "build"
-  build:
-    # The type of runner that the job will run on
+  backup-alm-test:
     runs-on: ubuntu-latest
-
-    # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v2
 
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, world!
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: '{"clientId":"${{ env.AZURE_TEST_CLIENT_ID }}","clientSecret":"${{ env.AZURE_TEST_CLIENT_SECRET }}","subscriptionId":"${{ env.AZURE_TEST_SUBSCRIPTION_ID }}","tenantId":"${{ env.AZURE_TENANT_ID}}"}'
+          environment: 'AzureUSGovernment'
 
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
+      - name: Json_backup
+        shell: bash
         run: |
-          echo Add other actions to build,
-          echo test, and deploy your project.
+          echo "Authenticating with Azure using Service Principal..."
+          echo "Successfully authenticated."
+
+          if [ -z "${{ env.AZURE_TEST_SUBSCRIPTION_ID }}" ]; then
+            echo "Error: AZURE_TEST_SUBSCRIPTION_ID is not set or empty!"
+            exit 1
+          fi
+
+          echo "Setting Azure context for subscription: $AZURE_TEST_SUBSCRIPTION_ID"
+          az account set --subscription "${{ env.AZURE_TEST_SUBSCRIPTION_ID }}"
+          subscriptionId=$AZURE_TEST_SUBSCRIPTION_ID
+          echo "Setting Azure context for subscription: $subscriptionId"      
+          az account set --subscription "$subscriptionId"
+
+          timestamp=$(date +"%Y%m%d-%H%M%S")
+          baseFolder="."
+          subscriptionFolder="$baseFolder/ALM-TEST"
+          mkdir -p "$subscriptionFolder"
+          echo "Folder for subscription: $subscriptionFolder"
+
+          resourceGroups=$(az group list --query "[].name" -o json)
+          if [ "$(echo $resourceGroups | jq '. | length')" -eq 0 ]; then
+              echo "No resource groups found in subscription: $subscriptionId"
+              exit 0
+          fi
+
+          echo "Found $(echo $resourceGroups | jq '. | length') resource group(s) in subscription: $subscriptionId."
+
+          for resourceGroupName in $(echo $resourceGroups | jq -r '.[]'); do
+              echo "Processing resource group: $resourceGroupName"
+              resourceGroupFolder="$subscriptionFolder/$resourceGroupName"
+              mkdir -p "$resourceGroupFolder"
+              fileName="${resourceGroupName}_${timestamp}.json"
+              filePath="$resourceGroupFolder/$fileName"
+
+              echo "Attempting to export ARM template for resource group: $resourceGroupName"
+              export_result=$(az group export --name "$resourceGroupName" --include-parameter-default-value --skip-resource-name-params)
+              export_status=$?
+
+              if [ $export_status -eq 0 ]; then
+                  echo "$export_result" > "$filePath"
+                  filesize=$(du -h "$filePath" | cut -f1)
+                  echo "Exported ARM template saved to: $filePath (Size: $filesize)"
+
+                  if jq empty "$filePath" 2>/dev/null; then
+                      echo "Verified valid JSON content in the exported file"
+                  else
+                      echo "Warning: Exported file may not contain valid JSON"
+                      echo "First 100 characters of file content:"
+                      head -c 100 "$filePath"
+                  fi
+              else
+                  echo "Failed to export ARM template for resource group: $resourceGroupName"
+                  echo "Error details: $export_result"
+                  echo "Trying alternative export method..."
+                  az deployment group list --resource-group "$resourceGroupName" --query "[0].properties.template" -o json > "$filePath"
+
+                  if [ -s "$filePath" ]; then
+                      echo "Alternative export method succeeded"
+                  else
+                      echo "Alternative export also failed. Resource group may not have deployments to export."
+                      echo "{ \"error\": \"No deployments found to export\" }" > "$filePath"
+                  fi
+              fi
+          done
+
+          echo "Script execution completed!"
+
+      - name: List files before upload
+        shell: bash
+        run: ls -R
+
+      - name: Upload TEST Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: alm-test-backup
+          path: ./ALM-TEST
+          if-no-files-found: ignore
+          retention-days: 1
+
+  backup-alm-dev:
+    runs-on: ubuntu-latest
+    needs: backup-alm-test
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: '{"clientId":"${{ env.AZURE_DEV_CLIENT_ID }}","clientSecret":"${{ env.AZURE_DEV_CLIENT_SECRET }}","subscriptionId":"${{ env.AZURE_DEV_SUBSCRIPTION_ID }}","tenantId":"${{ env.AZURE_TENANT_ID}}"}'
+          environment: 'AzureUSGovernment'
+
+      - name: Json_backup
+        shell: bash
+        run: |
+          echo "Authenticating with Azure using Service Principal..."
+          echo "Successfully authenticated."
+
+          if [ -z "${{ env.AZURE_DEV_SUBSCRIPTION_ID }}" ]; then
+            echo "Error: AZURE_DEV_SUBSCRIPTION_ID is not set or empty!"
+            exit 1
+          fi
+
+          echo "Setting Azure context for subscription: $AZURE_DEV_SUBSCRIPTION_ID"
+          az account set --subscription "${{ env.AZURE_DEV_SUBSCRIPTION_ID }}"
+          subscriptionId=$AZURE_DEV_SUBSCRIPTION_ID
+
+          timestamp=$(date +"%Y%m%d-%H%M%S")
+          baseFolder="."
+          subscriptionFolder="$baseFolder/ALM-DEV"
+          mkdir -p "$subscriptionFolder"
+          echo "Folder for subscription: $subscriptionFolder"
+
+          resourceGroups=$(az group list --query "[].name" -o json)
+          if [ "$(echo $resourceGroups | jq '. | length')" -eq 0 ]; then
+              echo "No resource groups found in subscription: $subscriptionId"
+              exit 0
+          fi
+
+          echo "Found $(echo $resourceGroups | jq '. | length') resource group(s) in subscription: $subscriptionId."
+
+          for resourceGroupName in $(echo $resourceGroups | jq -r '.[]'); do
+              echo "Processing resource group: $resourceGroupName"
+              resourceGroupFolder="$subscriptionFolder/$resourceGroupName"
+              mkdir -p "$resourceGroupFolder"
+              fileName="${resourceGroupName}_${timestamp}.json"
+              filePath="$resourceGroupFolder/$fileName"
+
+              echo "Attempting to export ARM template for resource group: $resourceGroupName"
+              export_result=$(az group export --name "$resourceGroupName" --include-parameter-default-value --skip-resource-name-params)
+              export_status=$?
+
+              if [ $export_status -eq 0 ]; then
+                  echo "$export_result" > "$filePath"
+                  filesize=$(du -h "$filePath" | cut -f1)
+                  echo "Exported ARM template saved to: $filePath (Size: $filesize)"
+
+                  if jq empty "$filePath" 2>/dev/null; then
+                      echo "Verified valid JSON content in the exported file"
+                  else
+                      echo "Warning: Exported file may not contain valid JSON"
+                      echo "First 100 characters of file content:"
+                      head -c 100 "$filePath"
+                  fi
+              else
+                  echo "Failed to export ARM template for resource group: $resourceGroupName"
+                  echo "Error details: $export_result"
+                  echo "Trying alternative export method..."
+                  az deployment group list --resource-group "$resourceGroupName" --query "[0].properties.template" -o json > "$filePath"
+
+                  if [ -s "$filePath" ]; then
+                      echo "Alternative export method succeeded"
+                  else
+                      echo "Alternative export also failed. Resource group may not have deployments to export."
+                      echo "{ \"error\": \"No deployments found to export\" }" > "$filePath"
+                  fi
+              fi
+          done
+
+          echo "Script execution completed!"
+
+      - name: List files before upload
+        shell: bash
+        run: ls -R
+
+      - name: Upload DEV Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: alm-dev-backup
+          path: ./ALM-DEV
+          if-no-files-found: ignore
+          retention-days: 1
+
+  backup-alm-pre:
+    runs-on: ubuntu-latest
+    needs: backup-alm-dev
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: '{"clientId":"${{ env.AZURE_PRE_CLIENT_ID }}","clientSecret":"${{ env.AZURE_PRE_CLIENT_SECRET }}","subscriptionId":"${{ env.AZURE_PRE_SUBSCRIPTION_ID }}","tenantId":"${{ env.AZURE_TENANT_ID}}"}'
+          environment: 'AzureUSGovernment'
+
+      - name: Json_backup
+        shell: bash
+        run: |
+          echo "Authenticating with Azure using Service Principal..."
+          echo "Successfully authenticated."
+
+          if [ -z "${{ env.AZURE_PRE_SUBSCRIPTION_ID }}" ]; then
+            echo "Error: AZURE_PRE_SUBSCRIPTION_ID is not set or empty!"
+            exit 1
+          fi
+
+          echo "Setting Azure context for subscription: $AZURE_PRE_SUBSCRIPTION_ID"
+          az account set --subscription "${{ env.AZURE_PRE_SUBSCRIPTION_ID }}"
+          subscriptionId=$AZURE_PRE_SUBSCRIPTION_ID
+
+          timestamp=$(date +"%Y%m%d-%H%M%S")
+          baseFolder="."
+          subscriptionFolder="$baseFolder/ALM-PREPROD"
+          mkdir -p "$subscriptionFolder"
+          echo "Folder for subscription: $subscriptionFolder"
+
+          resourceGroups=$(az group list --query "[].name" -o json)
+          if [ "$(echo $resourceGroups | jq '. | length')" -eq 0 ]; then
+              echo "No resource groups found in subscription: $subscriptionId"
+              exit 0
+          fi
+
+          echo "Found $(echo $resourceGroups | jq '. | length') resource group(s) in subscription: $subscriptionId."
+
+          for resourceGroupName in $(echo $resourceGroups | jq -r '.[]'); do
+              echo "Processing resource group: $resourceGroupName"
+              resourceGroupFolder="$subscriptionFolder/$resourceGroupName"
+              mkdir -p "$resourceGroupFolder"
+              fileName="${resourceGroupName}_${timestamp}.json"
+              filePath="$resourceGroupFolder/$fileName"
+
+              echo "Attempting to export ARM template for resource group: $resourceGroupName"
+              export_result=$(az group export --name "$resourceGroupName" --include-parameter-default-value --skip-resource-name-params)
+              export_status=$?
+
+              if [ $export_status -eq 0 ]; then
+                  echo "$export_result" > "$filePath"
+                  filesize=$(du -h "$filePath" | cut -f1)
+                  echo "Exported ARM template saved to: $filePath (Size: $filesize)"
+
+                  if jq empty "$filePath" 2>/dev/null; then
+                      echo "Verified valid JSON content in the exported file"
+                  else
+                      echo "Warning: Exported file may not contain valid JSON"
+                      echo "First 100 characters of file content:"
+                      head -c 100 "$filePath"
+                  fi
+              else
+                  echo "Failed to export ARM template for resource group: $resourceGroupName"
+                  echo "Error details: $export_result"
+                  echo "Trying alternative export method..."
+                  az deployment group list --resource-group "$resourceGroupName" --query "[0].properties.template" -o json > "$filePath"
+
+                  if [ -s "$filePath" ]; then
+                      echo "Alternative export method succeeded"
+                  else
+                      echo "Alternative export also failed. Resource group may not have deployments to export."
+                      echo "{ \"error\": \"No deployments found to export\" }" > "$filePath"
+                  fi
+              fi
+          done
+
+          echo "Script execution completed!"
+
+      - name: List files before upload
+        shell: bash
+        run: ls -R
+
+      - name: Upload PRE Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: alm-pre-backup
+          path: ./ALM-PREPROD
+          if-no-files-found: ignore
+          retention-days: 1
+
+  backup-alm-prod:
+    runs-on: ubuntu-latest
+    needs: backup-alm-pre
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: '{"clientId":"${{ env.AZURE_PROD_CLIENT_ID }}","clientSecret":"${{ env.AZURE_PROD_CLIENT_SECRET }}","subscriptionId":"${{ env.AZURE_PROD_SUBSCRIPTION_ID }}","tenantId":"${{ env.AZURE_TENANT_ID}}"}'
+          environment: 'AzureUSGovernment'
+
+      - name: Json_backup
+        shell: bash
+        run: |
+          echo "Authenticating with Azure using Service Principal..."
+          echo "Successfully authenticated."
+
+          if [ -z "${{ env.AZURE_PROD_SUBSCRIPTION_ID }}" ]; then
+            echo "Error: AZURE_PROD_SUBSCRIPTION_ID is not set or empty!"
+            exit 1
+          fi
+
+          echo "Setting Azure context for subscription: $AZURE_PROD_SUBSCRIPTION_ID"
+          az account set --subscription "${{ env.AZURE_PROD_SUBSCRIPTION_ID }}"
+          subscriptionId=$AZURE_PROD_SUBSCRIPTION_ID
+
+          timestamp=$(date +"%Y%m%d-%H%M%S")
+          baseFolder="."
+          subscriptionFolder="$baseFolder/ALM-PROD"
+          mkdir -p "$subscriptionFolder"
+          echo "Folder for subscription: $subscriptionFolder"
+
+          resourceGroups=$(az group list --query "[].name" -o json)
+          if [ "$(echo $resourceGroups | jq '. | length')" -eq 0 ]; then
+              echo "No resource groups found in subscription: $subscriptionId"
+              exit 0
+          fi
+
+          echo "Found $(echo $resourceGroups | jq '. | length') resource group(s) in subscription: $subscriptionId."
+
+          for resourceGroupName in $(echo $resourceGroups | jq -r '.[]'); do
+              echo "Processing resource group: $resourceGroupName"
+              resourceGroupFolder="$subscriptionFolder/$resourceGroupName"
+              mkdir -p "$resourceGroupFolder"
+              fileName="${resourceGroupName}_${timestamp}.json"
+              filePath="$resourceGroupFolder/$fileName"
+
+              echo "Attempting to export ARM template for resource group: $resourceGroupName"
+              export_result=$(az group export --name "$resourceGroupName" --include-parameter-default-value --skip-resource-name-params)
+              export_status=$?
+
+              if [ $export_status -eq 0 ]; then
+                  echo "$export_result" > "$filePath"
+                  filesize=$(du -h "$filePath" | cut -f1)
+                  echo "Exported ARM template saved to: $filePath (Size: $filesize)"
+
+                  if jq empty "$filePath" 2>/dev/null; then
+                      echo "Verified valid JSON content in the exported file"
+                  else
+                      echo "Warning: Exported file may not contain valid JSON"
+                      echo "First 100 characters of file content:"
+                      head -c 100 "$filePath"
+                  fi
+              else
+                  echo "Failed to export ARM template for resource group: $resourceGroupName"
+                  echo "Error details: $export_result"
+                  echo "Trying alternative export method..."
+                  az deployment group list --resource-group "$resourceGroupName" --query "[0].properties.template" -o json > "$filePath"
+
+                  if [ -s "$filePath" ]; then
+                      echo "Alternative export method succeeded"
+                  else
+                      echo "Alternative export also failed. Resource group may not have deployments to export."
+                      echo "{ \"error\": \"No deployments found to export\" }" > "$filePath"
+                  fi
+              fi
+          done
+
+          echo "Script execution completed!"
+
+      - name: List files before upload
+        shell: bash
+        run: ls -R
+
+      - name: Upload PROD Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: alm-prod-backup
+          path: ./ALM-PROD
+          if-no-files-found: ignore
+          retention-days: 1
+
+  push-all-backups:
+    runs-on: ubuntu-latest
+    needs: [backup-alm-test, backup-alm-dev, backup-alm-pre, backup-alm-prod]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Download TEST Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: alm-test-backup
+          path: ./ALM-TEST
+
+      - name: Download DEV Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: alm-dev-backup
+          path: ./ALM-DEV
+
+      - name: Download PRE Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: alm-pre-backup
+          path: ./ALM-PREPROD
+
+      - name: Download PROD Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: alm-prod-backup
+          path: ./ALM-PROD
+
+      - name: List files before commit
+        shell: bash
+        run: ls -R
+
+      - name: Commit and Push All Backups
+        run: |
+          git config --global user.email "no-reply@github.com"
+          git config --global user.name "GitHub Actions"
+         
+          # List all downloaded files for verification
+          echo "Files to be committed:"
+          find . -type f -name "*.json" | sort
+         
+          git add .
+          git commit -m "ARM Templates Backup for ALL ALM Environments" --allow-empty
+          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
+          git push
